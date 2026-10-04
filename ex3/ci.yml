@@ -1,0 +1,88 @@
+# ============================================================
+# Pipeline CI/CD - Dự án Quản lý nhân sự
+# Bao gồm 2 stage: test (có PostgreSQL) và build
+# ============================================================
+
+# Khai báo 2 stage chạy tuần tự
+stages:
+  - test
+  - build
+
+# Biến môi trường dùng chung cho toàn pipeline
+variables:
+  POSTGRES_DB: hr_db
+  POSTGRES_USER: hr_user
+  POSTGRES_PASSWORD: hr_password
+  # Cấu hình để Gradle kết nối tới PostgreSQL service
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/hr_db"
+  SPRING_DATASOURCE_USERNAME: "hr_user"
+  SPRING_DATASOURCE_PASSWORD: "hr_password"
+
+# ============================================================
+# STAGE 1: TEST - Chạy Integration Test với PostgreSQL
+# ============================================================
+test_job:
+  stage: test
+  image: gradle:7.6-jdk17
+
+  # Khai báo service PostgreSQL chạy song song với job
+  services:
+    - name: postgres:14-alpine
+      alias: postgres
+
+  # Biến môi trường riêng cho service PostgreSQL
+  variables:
+    POSTGRES_DB: hr_db
+    POSTGRES_USER: hr_user
+    POSTGRES_PASSWORD: hr_password
+
+  # Cache thư mục Gradle để tăng tốc
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle/
+
+  before_script:
+    # Cấp quyền thực thi cho Gradle Wrapper
+    - chmod +x ./gradlew
+    # Chờ PostgreSQL sẵn sàng (dùng netcat hoặc pg_isready)
+    - apt-get update -qq && apt-get install -y -qq postgresql-client || true
+    - until pg_isready -h postgres -p 5432 -U hr_user; do echo "Waiting for postgres..."; sleep 2; done
+
+  script:
+    # Chạy unit test + integration test với PostgreSQL
+    - ./gradlew test
+
+  # Lưu báo cáo test (kể cả khi fail vẫn giữ để debug)
+  artifacts:
+    when: always
+    paths:
+      - build/reports/tests/
+      - build/test-results/
+    expire_in: 1 week
+
+# ============================================================
+# STAGE 2: BUILD - Đóng gói JAR (bỏ qua test vì đã chạy ở stage trước)
+# ============================================================
+build_job:
+  stage: build
+  image: gradle:7.6-jdk17
+
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .gradle/
+
+  before_script:
+    - chmod +x ./gradlew
+
+  script:
+    # Build JAR, không chạy lại test
+    - ./gradlew build -x test
+
+  # Lưu file JAR sinh ra sau khi build
+  artifacts:
+    name: "hr-service-jar-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - build/libs/*.jar
+    expire_in: 1 day
